@@ -80,7 +80,14 @@ public class AgentOrchestrator {
                     return Mono.just(IntentResult.unknown("识别异常"));
                 })
                 // ③ 按意图分发
-                .flatMapMany(result -> dispatch(userId, msg, result));
+                .flatMapMany(result -> dispatch(userId, msg, result))
+                // ④ 流兜底：一旦开始推送数据，@RestControllerAdvice 就管不到了
+                //    （HTTP 响应头已发出，前端只会收到半截文字）。
+                //    降级链路返回的是真正的流，它的异步错误只能在这里拦。
+                .onErrorResume(e -> {
+                    log.error("处理请求时出错，userId={}，msg={}", userId, msg, e);
+                    return Flux.just("抱歉，处理你的问题时出了点意外，请稍后再试，或者转人工客服。");
+                });
     }
 
     private Flux<String> dispatch(Long userId, String msg, IntentResult result) {

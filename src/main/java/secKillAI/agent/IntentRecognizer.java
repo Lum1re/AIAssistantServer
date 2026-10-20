@@ -20,6 +20,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 
 /**
@@ -53,11 +54,15 @@ public class IntentRecognizer implements IntentClassifier {
     private final StreamingChatLanguageModel streamingChatLanguageModel;
     private final ObjectMapper objectMapper;
 
-    @Value("${ai.agent.intent.timeout-ms:3000}")
+    @Value("${ai.agent.intent.timeout-ms:10000}")
     private long timeoutMs;
 
     @Value("${ai.agent.intent.min-confidence:0.6}")
     private double minConfidence;
+
+    /** 仅用于排查：超时的时候把当前模型名一起打出来 */
+    @Value("${langchain4j.open-ai.streaming-chat-model.model-name:未知}")
+    private String modelName;
 
     /**
      * 识别用户这句话的意图。
@@ -89,10 +94,18 @@ public class IntentRecognizer implements IntentClassifier {
                 new SystemMessage(SYSTEM_PROMPT),
                 new UserMessage(buildPrompt(msg)));
 
+        long startAt = System.currentTimeMillis();
+        AtomicLong firstTokenAt = new AtomicLong(0);
+
         streamingChatLanguageModel.chat(messages, new StreamingChatResponseHandler() {
             @Override
             public void onPartialResponse(String partialResponse) {
                 if (partialResponse != null) {
+                    // 记录首字延迟：这是判断"模型慢"还是"根本没连上"的关键
+                    if (firstTokenAt.compareAndSet(0L, System.currentTimeMillis())) {
+                        log.debug("意图识别收到首个分片，首字延迟 {}ms",
+                                firstTokenAt.get() - startAt);
+                    }
                     buffer.append(partialResponse);
                 }
             }
@@ -117,7 +130,14 @@ public class IntentRecognizer implements IntentClassifier {
 
         try {
             if (!latch.await(timeoutMs, TimeUnit.MILLISECONDS)) {
-                throw new IllegalStateException("意图识别超时（" + timeoutMs + "ms）");
+                // 把"收到多少字、首字等了多久"写进异常，
+                // 这样一眼能区分：一个分片都没有 = 连不上/鉴权失败；有分片但没写完 = 太慢
+                String progress = firstTokenAt.get() == 0L
+                        ? "一个分片都没收到，多半是 API Key 无效、模型名不存在，或网络到不了 DashScope"
+                        : "已收到 " + buffer.length() + " 个字符，首字延迟 "
+                                + (firstTokenAt.get() - startAt) + "ms，只是没在时限内写完";
+                throw new IllegalStateException("意图识别超时（" + timeoutMs + "ms）："
+                        + progress + "。当前模型=" + modelName);
             }
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();

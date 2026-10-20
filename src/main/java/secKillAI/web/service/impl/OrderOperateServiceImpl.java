@@ -95,10 +95,17 @@ public class OrderOperateServiceImpl implements IOrderOperateService {
                     + "- 秒杀价：" + product.getSeckillPrice() + " 元\n"
                     + "- 状态：待支付（超时未支付订单会自动取消并释放库存）\n"
                     + "请提醒用户尽快完成支付。";
-        } catch (Exception e) {
-            // 数据库这步失败，把 Redis 预扣的库存还回去
+        } catch (RuntimeException e) {
+            // ① Redis 不在事务里，必须手动回补
             redisTemplate.opsForHash().increment(stockKey, stockField, 1);
-            return "下单失败，请稍后再试。";
+            // ② MySQL 库存不用在这里补：decrStock 和 insertOrder 在同一个事务，
+            //    异常继续抛出后 Spring 会把那 -1 一起撤销。
+            //    在这里再调一次 incrStock 只会被一起回滚，白写而且误导后来的人。
+            log.error("下单失败，已回补 Redis 库存 userId={} time={} seckillId={}",
+                    userId, time, seckillId, e);
+            // ③ 必须继续抛出：catch 里 return 会让 @Transactional 正常提交，
+            //    结果就是"订单没建成、库存却少了一件"。
+            throw e;
         }
     }
 
