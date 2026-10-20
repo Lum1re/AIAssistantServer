@@ -34,6 +34,9 @@ import java.util.Map;
 @Component
 public class AgentOrchestrator {
 
+    /** 内部出错时给用户的兜底话术。刻意不暴露任何技术细节。 */
+    public static final String FALLBACK_REPLY = "抱歉，处理你的问题时出了点意外，请稍后再试，或者转人工客服。";
+
     private final IntentClassifier intentClassifier;
     private final FallbackChat fallbackChat;
     private final Map<Intent, IntentHandler> handlerMap;
@@ -85,8 +88,12 @@ public class AgentOrchestrator {
                 //    （HTTP 响应头已发出，前端只会收到半截文字）。
                 //    降级链路返回的是真正的流，它的异步错误只能在这里拦。
                 .onErrorResume(e -> {
-                    log.error("处理请求时出错，userId={}，msg={}", userId, msg, e);
-                    return Flux.just("抱歉，处理你的问题时出了点意外，请稍后再试，或者转人工客服。");
+                    // 默认（INFO 级）只打消息长度，不打原文；
+                    // 需要看用户原话时开 dev profile（DEBUG 级）。
+                    log.error("处理请求时出错，userId={}，消息长度={}",
+                            userId, msg == null ? 0 : msg.length(), e);
+                    log.debug("出错的消息原文：{}", msg);
+                    return Flux.just(FALLBACK_REPLY);
                 });
     }
 
@@ -104,7 +111,7 @@ public class AgentOrchestrator {
             // 处理器是同步拼话术的，异常会在这里抛出，不能让它落入响应式流变成半截响应
             log.error("处理意图 {} 时出错，userId={}，槽位={}",
                     result.intent(), userId, result.slots(), e);
-            return Flux.just("抱歉，处理你的问题时出了点意外，请稍后再试，或者转人工客服。");
+            return Flux.just(FALLBACK_REPLY);
         }
     }
 

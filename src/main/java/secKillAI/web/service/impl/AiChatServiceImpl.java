@@ -45,7 +45,15 @@ public class AiChatServiceImpl implements IAiChatService {
 
         if ("legacy".equalsIgnoreCase(agentMode)) {
             log.debug("agent 模式=legacy，userId={}", phone);
-            return legacyChatAgent.chat(phone, msg);
+            // 降级链路同样需要兜底：它是在"新链路出问题"时才会被启用，
+            // 恰恰是最需要保证用户不会看到半截回复的时候。
+            return legacyChatAgent.chat(phone, msg)
+                    .onErrorResume(e -> {
+                        log.error("legacy 链路出错，userId={}，消息长度={}",
+                                phone, msg == null ? 0 : msg.length(), e);
+                        log.debug("出错的消息原文：{}", msg);
+                        return Flux.just(AgentOrchestrator.FALLBACK_REPLY);
+                    });
         }
 
         return agentOrchestrator.handle(phone, msg);
