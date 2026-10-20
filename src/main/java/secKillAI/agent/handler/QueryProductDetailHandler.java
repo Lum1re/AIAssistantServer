@@ -2,7 +2,6 @@ package secKillAI.agent.handler;
 
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Component;
-import reactor.core.publisher.Flux;
 import secKillAI.DTO.SeckillProductVo;
 import secKillAI.agent.AgentContext;
 import secKillAI.agent.Intent;
@@ -14,13 +13,14 @@ import java.util.List;
 /**
  * 查商品详情（只读）。
  *
- * <p>关键点：这里要的是 **productId**（{@code s-product.t_product.id}），
- * 不是 seckillId。用户说商品名时，先经过 {@link ProductResolver} 找到秒杀商品，
- * 再从里面把 productId 取出来——不让模型去猜是哪套 ID。
+ * <p>关键点：这里要的是 <b>productId</b>（{@code s-product.t_product.id}），不是 seckillId。
+ * 用户说商品名时，先经过 {@link ProductResolver} 找到秒杀商品，再取它的 productId。
  */
 @Component
 @RequiredArgsConstructor
 public class QueryProductDetailHandler implements IntentHandler {
+
+    static final String SLOT_KEYWORD = "productKeyword";
 
     private static final int MAX_DETAIL_LENGTH = 150;
 
@@ -33,29 +33,29 @@ public class QueryProductDetailHandler implements IntentHandler {
     }
 
     @Override
-    public Flux<String> handle(AgentContext context) {
+    public HandlerOutcome handle(AgentContext context) {
         Long productId = context.longVal("productId");
 
         if (productId == null) {
             String keyword = context.str("productKeyword");
             if (keyword == null) {
-                return Flux.just("你想了解哪件商品的详情？可以说商品名，我帮你找。");
+                return HandlerOutcome.ask("你想了解哪件商品的详情？可以说商品名，我帮你找。", SLOT_KEYWORD);
             }
             List<ProductResolver.Hit> hits = productResolver.match(context.time(), keyword);
             if (hits.isEmpty()) {
-                return Flux.just("没找到「" + keyword + "」这件商品，可以说得再具体一点。");
+                return HandlerOutcome.reply("没找到「" + keyword + "」这件商品，可以说得再具体一点。");
             }
             if (hits.size() > 1) {
-                return Flux.just(askWhichOne(hits));
+                return HandlerOutcome.ask(askWhichOne(hits), SLOT_KEYWORD);
             }
             productId = hits.get(0).productId();
         }
 
         List<SeckillProductVo> products = seckillProductMapper.queryProductsByIds(List.of(productId));
         if (products == null || products.isEmpty()) {
-            return Flux.just("没有查到这件商品的详情。");
+            return HandlerOutcome.reply("没有查到这件商品的详情。");
         }
-        return Flux.just(format(products));
+        return HandlerOutcome.reply(format(products));
     }
 
     private String format(List<SeckillProductVo> products) {

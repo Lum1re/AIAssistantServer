@@ -3,7 +3,6 @@ package secKillAI.agent.handler;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
-import reactor.core.publisher.Flux;
 import secKillAI.DTO.OrderInfoVo;
 import secKillAI.agent.AgentContext;
 import secKillAI.agent.Intent;
@@ -16,9 +15,6 @@ import java.util.Date;
 /**
  * 查订单（只读）。
  *
- * <p>这是 P1 用来打通整条管线的最小意图：一个必填槽位（订单号）、一次数据库查询、
- * 一段模板话术。话术不交给模型生成——订单信息是结构化的，模板 0 延迟、0 成本、0 编造风险。
- *
  * <p>安全：{@code userId} 由 {@link AgentContext} 从服务端注入，SQL 里带
  * {@code AND user_id = ?}，模型既看不到也改不了。
  */
@@ -26,6 +22,8 @@ import java.util.Date;
 @Component
 @RequiredArgsConstructor
 public class QueryOrderHandler implements IntentHandler {
+
+    static final String SLOT_ORDER_NO = "orderNo";
 
     private static final String ORDER_NO_HINT = "请提供订单号，在「我的订单」页面可以看到（15~25 位数字）。";
 
@@ -37,20 +35,21 @@ public class QueryOrderHandler implements IntentHandler {
     }
 
     @Override
-    public Flux<String> handle(AgentContext context) {
+    public HandlerOutcome handle(AgentContext context) {
         String orderNo = context.orderNo();
         if (orderNo == null) {
-            // 槽位缺失或格式不对，追问。注意：绝不替用户猜一个订单号
-            return Flux.just(ORDER_NO_HINT);
+            // 槽位缺失或格式不对 → 追问，并告诉编排器"在等 orderNo"
+            return HandlerOutcome.ask(ORDER_NO_HINT, SLOT_ORDER_NO);
         }
 
         OrderInfoVo order = orderInfoMapper.queryOrder(orderNo, context.userId());
         if (order == null) {
-            return Flux.just("没查到订单 " + orderNo + "，请确认订单号是否正确，或者该订单不属于当前账号。");
+            return HandlerOutcome.reply(
+                    "没查到订单 " + orderNo + "，请确认订单号是否正确，或者该订单不属于当前账号。");
         }
 
         log.info("用户 {} 查询订单 {} 成功", context.userId(), orderNo);
-        return Flux.just(format(order));
+        return HandlerOutcome.reply(format(order));
     }
 
     private String format(OrderInfoVo order) {
