@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd" >
+<mapper namespace="secKillAI.web.mapper.SeckillProductMapper">
+    <update id="decrStock">
+        UPDATE `s-seckill`.t_seckill_product SET stock_count = stock_count - 1
+        WHERE id = #{seckillId} AND stock_count > 0
+    </update>
+    <update id="incrStock">
+        UPDATE `s-seckill`.t_seckill_product SET stock_count = stock_count + 1
+        WHERE id = #{seckillId}
+    </update>
+    <select id="queryByTime" resultType="secKillAI.DTO.SeckillProductVo">
+        SELECT sp.id, sp.product_id, sp.seckill_price, sp.stock_count,
+        p.product_name, p.product_title, p.product_price
+        FROM `s-seckill`.t_seckill_product sp
+        LEFT JOIN `s-product`.t_product p ON p.id = sp.product_id
+        WHERE sp.time = #{time}
+        ORDER BY sp.id
+    </select>
+    <select id="queryProductsByIds" resultType="secKillAI.DTO.SeckillProductVo">
+        SELECT id, product_name, product_title, product_detail, product_price
+        FROM `s-product`.t_product
+        WHERE id IN
+        <foreach collection="ids" item="id" open="(" separator="," close=")">
+            #{id}
+        </foreach>
+    </select>
+</mapper>

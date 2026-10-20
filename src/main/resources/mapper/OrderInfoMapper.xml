@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd" >
+<mapper namespace="secKillAI.web.mapper.OrderInfoMapper">
+    <insert id="insertOrder">
+        INSERT INTO `s-seckill`.t_order_info
+        (order_no, user_id, product_id, product_img, delivery_addr_id, product_name,
+        product_count, product_price, seckill_price, status, create_date,
+        seckill_date, seckill_time, intergral, seckill_id)
+        VALUES
+        (#{orderNo}, #{userId}, #{productId}, #{productImg}, -1, #{productName},
+        #{productCount}, #{productPrice}, #{seckillPrice}, #{status}, NOW(),
+        CURDATE(), #{seckillTime}, #{intergral}, #{seckillId})
+    </insert>
+    <insert id="insertRefundLog">
+        INSERT INTO `s-seckill`.t_refund_log
+        (out_trade_no, refund_time, refund_amount, refund_reason, refund_type)
+        VALUES (#{outTradeNo}, NOW(), #{refundAmount}, #{refundReason}, 0)
+    </insert>
+    <update id="markRefunded">
+        UPDATE `s-seckill`.t_order_info
+        SET status = 4, pay_date = NOW()
+        WHERE order_no = #{orderNo} AND user_id = #{userId} AND status = 1
+    </update>
+    <select id="queryOrder" resultType="secKillAI.DTO.OrderInfoVo">
+        SELECT order_no, user_id, product_id, product_img, product_name, product_count,
+        product_price, seckill_price, status, pay_type, create_date, pay_date,
+        seckill_time, seckill_id, intergral
+        FROM `s-seckill`.t_order_info
+        WHERE order_no = #{orderNo} AND user_id = #{userId}
+    </select>
+</mapper>
