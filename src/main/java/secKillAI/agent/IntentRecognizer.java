@@ -8,6 +8,7 @@ import dev.langchain4j.data.message.UserMessage;
 import dev.langchain4j.model.chat.StreamingChatLanguageModel;
 import dev.langchain4j.model.chat.response.ChatResponse;
 import dev.langchain4j.model.chat.response.StreamingChatResponseHandler;
+import dev.langchain4j.model.output.TokenUsage;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
@@ -54,11 +55,13 @@ public class IntentRecognizer implements IntentClassifier {
     private final StreamingChatLanguageModel streamingChatLanguageModel;
     private final ObjectMapper objectMapper;
 
+    // 给上默认值（而不只是 @Value）：这样不经 Spring 直接 new 出来也能用，
+    // 评测脚本 IntentAccuracyCheck 就是这么用的。
     @Value("${ai.agent.intent.timeout-ms:10000}")
-    private long timeoutMs;
+    private long timeoutMs = 10_000L;
 
     @Value("${ai.agent.intent.min-confidence:0.6}")
-    private double minConfidence;
+    private double minConfidence = 0.6d;
 
     /** 仅用于排查：超时的时候把当前模型名一起打出来 */
     @Value("${langchain4j.open-ai.streaming-chat-model.model-name:未知}")
@@ -96,6 +99,7 @@ public class IntentRecognizer implements IntentClassifier {
 
         long startAt = System.currentTimeMillis();
         AtomicLong firstTokenAt = new AtomicLong(0);
+        AtomicReference<TokenUsage> tokenUsage = new AtomicReference<>();
 
         streamingChatLanguageModel.chat(messages, new StreamingChatResponseHandler() {
             @Override
@@ -117,6 +121,10 @@ public class IntentRecognizer implements IntentClassifier {
                         && completeResponse.aiMessage() != null
                         && completeResponse.aiMessage().text() != null) {
                     buffer.append(completeResponse.aiMessage().text());
+                }
+                // 顺手把 token 用量留下来：这是成本统计的唯一来源
+                if (completeResponse != null && completeResponse.tokenUsage() != null) {
+                    tokenUsage.set(completeResponse.tokenUsage());
                 }
                 latch.countDown();
             }
@@ -146,6 +154,8 @@ public class IntentRecognizer implements IntentClassifier {
         if (failure.get() != null) {
             throw new IllegalStateException("意图识别调用失败", failure.get());
         }
+        log.info("意图识别完成 cost={}ms tokens={}", System.currentTimeMillis() - startAt,
+                tokenUsage.get() == null ? "unknown" : tokenUsage.get());
         return buffer.toString();
     }
 
@@ -160,10 +170,12 @@ public class IntentRecognizer implements IntentClassifier {
         sb.append("""
                 
                 参数提取规则：
-                - time：只能是 10、12、14 三个数字。用户没说，或者说的不是这三个值，就不要填
+                - time：只能是 10、12、14 三个数字。用户说「十点」「十二点」「十四点」也要转成 10 / 12 / 14。
+                  用户没说，或者说的不是这三个值，就不要填
                 - orderNo：15~25 位纯数字，只能是用户原话里出现的数字串，绝对不能编造
-                - seckillId / productId：只有用户明确给出数字编号时才填
-                - productKeyword：用户提到的商品名称或关键词，保留原话，不要翻译或改写
+                - seckillId / productId：只有用户明确给出数字编号时才填，**不要自己推测编号**
+                - productKeyword：用户提到的商品名称或关键词，保留原话，不要翻译或改写。
+                  用户说「那个耳机」「蓝牙耳机」时，填 productKeyword，不要填 seckillId
                 - 提取不到的参数直接省略，宁可不填，也不要猜
                 
                 输出要求：只输出一行 JSON，不要 Markdown 代码块，不要任何解释文字：

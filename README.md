@@ -1,324 +1,219 @@
-# 秒杀商城 · AI 智能客服
+# 秒杀商城 · AI 智能客服（编排版）
 
-基于 **LangChain4j** 的智能客服服务，作为秒杀商城的 AI 能力补充，**独立部署**。
-
-支持多轮对话、业务查询（商品 / 库存 / 订单）和业务办理（下单 / 退款），
-并且具备**身份隔离**与**写操作二次确认**机制。
-
----
-
-## 功能特性
-
-### 对话能力
-
-- 多轮对话，会话记忆持久化到 MongoDB
-- 流式输出，逐字返回
-- 会话隔离：按登录用户区分，用户之间互不可见
-- 支持主动清空会话
-
-### 业务能力（工具调用）
-
-大模型通过函数调用自主决定使用哪个工具，无需前端传参。
-
-| 工具 | 说明 | 数据来源 |
-| --- | --- | --- |
-| 查场次商品 | 查询 10 / 12 / 14 点场次的秒杀商品 | MySQL（跨库 JOIN） |
-| 查实时库存 | 查询某件秒杀商品的实时剩余库存 | Redis |
-| 查商品详情 | 按商品 ID 查询参数、规格、描述 | MySQL |
-| 查订单 | 按订单号查询状态、商品、金额（仅限本人） | MySQL |
-| 秒杀下单 | 帮用户抢购指定商品，含防重与库存扣减 | MySQL + Redis |
-| 申请退款 | 两段式确认后执行退款，并回补库存 | MySQL + Redis |
-
-### 安全设计
-
-| 措施 | 说明 |
-| --- | --- |
-| 身份服务端注入 | 用户身份由服务端从 token 解析，**不经过大模型**，模型无法伪造 |
-| 越权防护 | 订单查询 SQL 强制带 `user_id` 条件，查不到别人的订单 |
-| 写操作二次确认 | 退款必须先 `prepareRefund` 再由用户确认，模型不能一步执行 |
-| 幂等保护 | 退款 SQL 带 `AND status = 1`，重复调用影响 0 行，不会退两次钱 |
-| 防重复抢购 | 复用原系统的 `seckillUniqueOrderset` 集合 |
-| 异常兜底 | 全局异常处理，不向前端暴露堆栈 |
+> **一句话**：把"要不要执行"的决定权，从大模型手里收回到代码手里。
+>
+> 模型只做两件事 —— **听懂**（分类 + 提参）和 **说话**（组织话术）；
+> **做什么、按什么顺序做、能不能做，全部由代码决定。**
 
 ---
 
-## 技术栈
+## 一、核心设计
 
-| 层 | 选型 |
-| --- | --- |
-| AI 框架 | LangChain4j 1.0.0-beta3 |
-| 大模型 | 通义千问（DashScope OpenAI 兼容模式） |
-| Web 框架 | Spring Boot 3.2.6 / JDK 17 |
-| 会话记忆 | MongoDB |
-| 业务数据 | MySQL 5.7（`s-seckill` / `s-product`） |
-| 缓存 | Redis（库存、防重、登录态） |
-| 前端 | Vue 3 + Vite |
+### 1.1 一次请求的链路
 
----
-
-## 架构
-
-### 系统架构
-
-```mermaid
-flowchart TB
-    UI["Vue 聊天界面<br/>localhost:5173"]
-
-    subgraph AI["AI 客服服务 · JDK 17 / Spring Boot 3 · :8090"]
-        CTRL["SecKillController"]
-        SVC["AiChatService<br/>每次请求构造助手"]
-        ASSIST["SecKillAssistant<br/>AiServices + 系统提示词"]
-        TOOLS["工具层<br/>QueryTool / OrderTool<br/>SeckillOrderTool / RefundTool"]
-        OPSVC["OrderOperateService<br/>下单 · 退款"]
-        MEM["MemoryStore"]
-    end
-
-    QWEN["通义千问<br/>DashScope 兼容模式"]
-    MONGO[("MongoDB<br/>会话记忆")]
-    MYSQL[("MySQL<br/>订单 / 商品 / 秒杀")]
-    REDIS[("Redis<br/>库存 / 防重 / 登录态")]
-
-    UI -->|"token + 消息"| CTRL
-    CTRL --> SVC
-    SVC --> ASSIST
-    ASSIST <-->|"流式对话"| QWEN
-    ASSIST -->|"函数调用"| TOOLS
-    TOOLS --> MEM
-    TOOLS --> OPSVC
-    TOOLS -->|"查询"| MYSQL
-    MEM --> MONGO
-    OPSVC --> MYSQL
-    OPSVC --> REDIS
-    SVC -->|"token → 手机号"| REDIS
-
-    classDef store fill:#eef4ff,stroke:#4f7cff
-    class MONGO,MYSQL,REDIS store
+```
+用户消息
+  ↓
+AiChatServiceImpl       token → Redis → 手机号（身份只从这里来）
+  ↓
+AgentOrchestrator       加用户级锁 → 读会话状态 → 路由
+  ├─ 用户说"算了"          → 清状态 + 清票据 → 结束
+  ├─ 在等确认              → ConfirmRules 判定 → 执行 / 取消 / 插话
+  ├─ 在等参数              → 模型识别不出就把这句当参数补上（补完要验证）
+  └─ 正常                  → IntentRecognizer 识别 → 查表分发
+  ↓
+IntentHandler           取槽位 → 调原有 Mapper/Service → 拼话术
+  ↓
+SSE 事件流                stage → delta… → done
 ```
 
-### 一次对话的完整链路
+### 1.2 三层防护（写操作）
 
-以「帮我查订单 1997233137251254272」为例：
+| 层 | 机制 | 防什么 |
+|---|---|---|
+| 1 | `ConfirmRules` 纯规则判定 | "用户是否确认"不再由模型判断 |
+| 2 | `ConfirmTicket` 一次性票据（Lua 原子取出即删） | 同一个确认执行两次 |
+| 3 | SQL `AND status = 1`（CAS） | 并发 / 任何泄漏场景 |
 
-```mermaid
-sequenceDiagram
-    participant U as 用户
-    participant F as 前端
-    participant C as Controller
-    participant S as AiChatService
-    participant L as 通义千问
-    participant T as OrderTool
-    participant DB as MySQL
+**任意一层失效，另外两层仍能挡住重复退款。**
 
-    U->>F: 帮我查订单 1997233137251254272
-    F->>C: GET /seckillAgent/chat<br/>Header: token
-    C->>S: chat(msg, token)
-    S->>S: token → Redis 查登录态 → 手机号
-    S->>S: 构造助手，把手机号绑进 OrderTool
-    S->>L: 系统提示词 + 历史记忆 + 用户消息
-    L-->>S: 请求调用 queryOrder(订单号)
-    S->>T: 执行工具
-    T->>DB: SELECT ... WHERE order_no=? AND user_id=?
-    DB-->>T: 订单数据
-    T-->>L: 工具结果
-    L-->>S: 生成自然语言回答（流式）
-    S-->>F: 逐字返回
-    F-->>U: 打字机效果
+### 1.3 降级策略
+
+| 场景 | 走哪 | 工具权限 |
+|---|---|---|
+| 意图没注册 / 识别失败 | 降级到 `LegacyChatAgent` | **只读**（查商品/库存/详情/订单） |
+| 人工改 `ai.agent.mode=legacy` | 完全老链路 | 完整（含下单/退款） |
+
+> 降级路径**不能**把写操作权限还给模型，否则只要降级一次，票据机制就形同虚设。
+
+---
+
+## 二、目录结构
+
+```
+src/main/java/secKillAI
+├── agent/
+│   ├── Intent.java                 8 个意图（枚举，含给模型看的 description）
+│   ├── IntentRecognizer.java       唯一真正调模型的地方（只输出 JSON，无工具）
+│   ├── AgentOrchestrator.java      路由 + 分发 + 状态读写
+│   ├── AgentContext.java           槽位校验（time 只认 10/12/14）
+│   ├── LegacyChatAgent.java        老链路（降级 / 人工回退）
+│   ├── TraceId.java                请求追踪 id
+│   ├── state/                      Stage / AgentState / AgentStateStore / AgentLock
+│   ├── confirm/                    ConfirmTicket / ConfirmTicketStore / ConfirmRules
+│   ├── handler/                    HandlerOutcome / IntentHandler / ConfirmableHandler
+│   │                               + 6 个具体处理器
+│   ├── result/                     ErrorCode（错误码 + 话术）/ ReplyTemplates
+│   └── event/                      SseEvents（事件构造）
+├── web/                            Controller / Service / Mapper
+├── tools/                          老链路的 @Tool（仅 legacy 模式与只读降级用）
+└── mongo/                          会话记忆（给模型看的历史）
+
+src/main/resources
+├── application.properties          主配置（不含任何密钥）
+├── application-dev.properties      本地调试（打印用户原文，勿在生产激活）
+├── prompts/seckill-prompt.txt      老链路的系统提示词
+├── eval/intent-golden-set.txt      意图识别评测集（30 条）
+└── mapper/*.xml                    MyBatis SQL
 ```
 
 ---
 
-## 快速开始
+## 三、接口
 
-### 环境要求
+| 接口 | 方法 | 参数 | 返回 |
+|---|---|---|---|
+| `/seckillAgent/chat` | GET | `msg`、header `token` | **SSE 事件流** |
+| `/seckillAgent/session/clear` | POST | header `token` | String |
 
-| 依赖 | 说明 |
-| --- | --- |
-| JDK 17 | 必须，Spring Boot 3 的最低要求 |
-| MySQL 5.7 | 需要 `s-seckill`、`s-product` 两个库 |
-| Redis | 默认 `127.0.0.1:6379` |
-| MongoDB | 默认 `127.0.0.1:27017` |
-| Node.js 18+ | 跑前端需要 |
+### SSE 事件格式
 
-### 1. 配置
+```
+data:{"type":"stage","stage":"ROUTING"}
+data:{"type":"delta","text":"订单 1997"}
+data:{"type":"error","message":"系统有点忙，请稍后再试"}
+data:{"type":"done"}
+```
 
-`src/main/resources/application.properties`：
+- `stage`：阶段变化（前端可显示"正在理解…"）
+- `delta`：一段正文
+- `error`：**流内错误**（HTTP 状态码已经发出去了，只能这样通知前端）
+- `done`：结束标记
+
+---
+
+## 四、配置
 
 ```properties
-server.port=8090
-
-# 大模型：通义千问（DashScope OpenAI 兼容模式）
+# 大模型（密钥走环境变量，绝不写进文件）
 langchain4j.open-ai.streaming-chat-model.base-url=https://dashscope.aliyuncs.com/compatible-mode/v1
 langchain4j.open-ai.streaming-chat-model.model-name=qwen3.7-plus
 langchain4j.open-ai.streaming-chat-model.api-key=${DASHSCOPE_API_KEY:}
 
-# 会话记忆
-spring.data.mongodb.uri=mongodb://localhost:27017/chat_memory_db
-chat.memoryMax=20
+# 数据库
+spring.datasource.username=${DB_USERNAME:root}
+spring.datasource.password=${MYSQL_PASSWORD:}
 
-# 业务库（默认库设为 s-seckill，跨库查 s-product 在 SQL 里写全名）
-spring.datasource.url=jdbc:mysql://localhost:3306/s-seckill?useUnicode=true&characterEncoding=UTF-8&serverTimezone=Asia/Shanghai&useSSL=false
-spring.datasource.username=root
-spring.datasource.password=root
-
-# 缓存
-spring.data.redis.host=127.0.0.1
-spring.data.redis.port=6379
+# 编排开关：orchestrated（默认）| legacy（回退到改造前）
+ai.agent.mode=orchestrated
+ai.agent.intent.timeout-ms=10000
+ai.agent.intent.min-confidence=0.6
+ai.agent.state-ttl-minutes=30
+ai.agent.lock-ttl-seconds=15
+ai.agent.confirm-ttl-minutes=5
 ```
 
-**api-key 通过环境变量注入**，不要写进文件：
+**必须配置的两个环境变量**：
 
 ```powershell
-$env:DASHSCOPE_API_KEY = "你的密钥"
+$env:DASHSCOPE_API_KEY = "sk-..."
+$env:MYSQL_PASSWORD    = "你的数据库密码"
 ```
 
-（IDEA 里也可以配在 Run Configuration 的 Environment variables 中。）
+> ⚠️ 密钥只放环境变量。`application.properties` 是被 git 跟踪的，写明文会公开。
 
-### 2. 准备测试登录态
+### Redis Key 一览
 
-当前没有接入登录服务，测试时手动往 Redis 塞一条用户登录态：
+| Key | 类型 | TTL | 用途 |
+|---|---|---|---|
+| `ai:agent:state:{userId}` | String(JSON) | 30 分钟 | 会话进度（在等什么） |
+| `ai:confirm:{userId}` | String(JSON) | 5 分钟 | 待确认操作票据 |
+| `ai:lock:{userId}` | String | 15 秒 | 用户级并发锁 |
+| `userToken:{token}` | String(JSON) | — | 登录态（含手机号） |
+| `seckillStockCount:{time}` | Hash | — | 秒杀库存 |
 
-```bash
-redis-cli SET userToken:test-token-123 "{\"phone\":13088889999,\"nickName\":\"test\"}"
-```
+---
 
-### 3. 启动后端
+## 五、运行
 
-直接运行 `secKillAI.Application`，或者：
+```powershell
+$env:JAVA_HOME = "C:\Program Files\Java\jdk-17.0.2"
+$env:DASHSCOPE_API_KEY = "sk-..."
+$env:MYSQL_PASSWORD = "xxx"
 
-```bash
+cd AIAssistantServer
 mvn spring-boot:run
 ```
 
-启动后访问 `http://localhost:8090`。
-
-### 4. 启动前端
-
-```bash
-cd D:\IdeaCode\workspace\AIChatFront
-npm install
-npm run dev
-```
-
-浏览器打开 `http://localhost:5173`，在右上角填入上面的 token 即可开始对话。
-
----
-
-## 接口说明
-
-| 接口 | 方法 | 参数 | 说明 |
-| --- | --- | --- | --- |
-| `/seckillAgent/chat` | GET | `msg`（query）、`token`（header） | 流式对话，返回 `Flux<String>` |
-| `/seckillAgent/session/clear` | POST | `token`（header） | 清空当前用户的会话记忆 |
-
-请求示例：
-
-```bash
-curl "http://localhost:8090/seckillAgent/chat?msg=你好" -H "token: test-token-123"
-```
-
-> 注意：`msg` 里的中文需要 URL 编码，用 Apifox / Postman 会更方便。
-
----
-
-## 关键设计说明
-
-### 1. 为什么做成独立服务
-
-原秒杀系统是 **JDK 8 + Spring Boot 2.3**，而 LangChain4j 需要 JDK 17。
-AI 客服不参与下单主链路，独立部署对它没有影响，所以直接做成独立服务：
-**共享同一套 MySQL 和 Redis，但不改动原系统任何代码。**
-
-### 2. 身份注入：token 不经过大模型
-
-工具类**不加 `@Component`**，而是每次请求由服务端 `new` 出来，构造时把当前用户的手机号绑进去：
-
-```java
-AiServices.builder(SecKillAssistant.class)
-        .tools(queryTool,
-               new OrderTool(orderInfoMapper, phone),
-               new SeckillOrderTool(orderOperateService, phone),
-               new RefundTool(orderOperateService, phone))
-        .build();
-```
-
-这样模型**看不到 token，也无法伪造身份**——它只能填业务参数（订单号），
-身份由服务端决定。加上 SQL 里的 `AND user_id = ?`，越权查询直接被数据库挡住。
-
-### 3. 退款为什么是两步
-
-退款会改动资金相关的数据，不能让它一步到底。流程是：
+**启动成功的标志**（必须是 6 个处理器）：
 
 ```
-用户：帮我退掉订单 xxx
-  → 模型调用 prepareRefund(orderNo)：校验归属、校验状态必须是「已支付」
-  → 服务端把待退订单暂存到 Redis（key: ai:refund:pending:{userId}，5 分钟有效）
-  → 模型把确认信息念给用户
-
-用户：确认
-  → 模型调用 confirmRefund()：不需要参数
-  → 服务端从 Redis 取出待退订单，二次校验后执行
+Agent 编排已启用，已注册处理器：
+[QUERY_ORDER, QUERY_PRODUCTS, QUERY_STOCK, QUERY_PRODUCT_DETAIL, REFUND, SECKILL_BUY]
 ```
 
-`confirmRefund()` **刻意不接收任何参数**——待退哪一单由服务端决定，
-模型既不能指定订单，也没有凭证可以伪造。
+### 造测试登录态
 
-而 `markRefunded` 的 SQL 带着 `AND status = 1`，即使被重复调用也只会生效一次：
-
-```sql
-UPDATE t_order_info SET status = 4, pay_date = NOW()
-WHERE order_no = #{orderNo} AND user_id = #{userId} AND status = 1
-```
-
-### 4. 会话记忆与隔离
-
-- 记忆存在 MongoDB，一个用户一条文档，`_id` 就是 memoryId
-- memoryId 由服务端生成：`token → Redis userToken:{token} → 手机号`
-- 每个用户保留最近 20 条消息（`MessageWindowChatMemory` 自动裁剪）
-- 前端只传 token 和消息，**不参与决定"这是谁的会话"**
-
-### 5. 下单的一致性处理
-
-秒杀是「缓存预扣 + 落库」的经典模式，这里做了同样的处理：
-
-1. 检查 `seckillUniqueOrderset:{time}`，防止重复抢购
-2. Redis 库存 `-1`（快速失败，扛并发）
-3. MySQL 扣库存，影响 0 行说明已售罄，回滚 Redis
-4. 写入订单（状态 0 = 待支付）
-5. 加入防重集合
-
-> 与原系统的差异：原系统通过 RocketMQ 异步建单、WebSocket 通知结果，
-> 这里做成了同步实现，保证交互上能立刻拿到订单号。
-
----
-
-## 项目结构
-
-```
-src/main/java/secKillAI
-├── assistant/     SecKillAssistant        助手接口（系统提示词 + 记忆）
-├── config/        SecKillAgentConfig      会话记忆工厂
-├── DTO/                                   订单、商品等数据对象
-├── handler/       GlobalExceptionHandler  全局异常兜底
-├── mongo/                                 会话记忆的实体与存储实现
-├── tools/                                 大模型可调用的工具
-│   ├── QueryTool          查商品 / 库存 / 详情
-│   ├── OrderTool          查订单
-│   ├── SeckillOrderTool   下单
-│   └── RefundTool         退款（两段式）
-└── web/
-    ├── controller/                        对外接口
-    ├── mapper/                            数据库访问
-    └── service/                           业务逻辑
+```powershell
+redis-cli SET userToken:test-token "{\"phone\":13800000000,\"nickName\":\"test\"}"
 ```
 
 ---
 
-## 已知限制
+## 六、测试
+
+| 测试类 | 覆盖 | 数量 |
+|---|---|---|
+| `AgentOrchestratorTest` | 分发 / 多轮补参数 / 两阶段确认 / 并发锁 | 24 |
+| `ConfirmRulesTest` | 确认判定（YES/NO/NONE） | 41 |
+| `ConfirmTicketStoreTest` | 票据一次性 / 过期 / 跨用户 | 8 |
+| `RefundHandlerTest` | 退款两阶段 + 参数不被篡改 | 8 |
+| `SeckillBuyHandlerTest` | 下单多步链 + 售罄不给确认 | 8 |
+| `AgentStateTest` | 状态对象与 JSON 往返 | 7 |
+| `ErrorCodeTest` | 错误码话术 / 异常不泄漏 | 5 |
+| `IntentGoldenSetTest` | 评测集格式 | 3 |
+
+**共 104 个，全部不依赖数据库/Redis/模型。**
+
+### 意图识别准确率（需真实模型）
+
+```
+运行 secKillAI.agent.eval.IntentAccuracyCheck（IDE 右键 Run）
+```
+
+基线数据在 `eval/intent-golden-set.txt`（30 条）。改提示词或换模型后重跑对比。
+
+---
+
+## 七、已知限制
 
 | 限制 | 说明 |
-| --- | --- |
-| 下单是同步实现 | 原系统走 MQ 异步建单，这里是同步模拟 |
-| 没有真实支付 | 测试时需要手动把订单状态改成已支付，才能测退款 |
-| 登录态靠手动注入 | 未接入 uaa 服务，测试 token 需要手动写入 Redis |
-| 会话不支持多轮会话列表 | 一个用户固定一个会话（可清空重开） |
-| Redis 版本要求 | 使用了 `HINCRBY` 等基础命令，兼容 Redis 3.2 |
+|---|---|
+| 意图识别失败 → 写操作办不了 | 安全换可用性：降级只读，用户重说一遍即可恢复 |
+| 一个用户同时只有一张待确认票据 | 新票据会覆盖旧票据 |
+| 补参数是"整句硬塞" | 用户回"十点"这类口语化参数可能失败（若模型没提取出结构化值） |
+| 只支持单会话 | 一个用户固定一份记忆，可清空重开 |
+| 未做限流 / 输入长度限制 | 生产环境需要补 |
+| 确认票据依赖 Redis | Redis 挂时退化成"无状态但可用" |
+
+---
+
+## 八、踩过的坑（留给后来人）
+
+| 坑 | 现象 | 原因 |
+|---|---|---|
+| record 的 `isXxx()` 被 Jackson 当属性 | 存进去读不出来，字段丢失 | `isExpired()` 被序列化成 `"expired":true`，反序列化时无对应参数 → 必须加 `@JsonIgnore` |
+| `chat-model.log-requests` 对流式模型无效 | 日志从来不生效 | 前缀必须是 `streaming-chat-model` |
+| 只靠 TTL 释放锁 | 用户 15 秒内发不了下一条 | 正常结束要主动释放，TTL 只做兜底 |
+| `catch` 里 `return` 让事务提交 | 订单没建成、库存却少一件 | 必须 `throw` 或至少 `setRollbackOnly`（后者会抛 UnexpectedRollbackException，不如直接抛） |
+| 单字确认词用"包含"匹配 | 用户问"银行"被判定为确认 | 短词必须整句相等 |

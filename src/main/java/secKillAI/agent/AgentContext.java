@@ -40,13 +40,44 @@ public record AgentContext(Long userId, String msg, Map<String, Object> slots) {
      *
      * <p>只接受 10 / 12 / 14。用户说「11 点有什么」时返回 null，
      * 由处理器回复「我们只有 10、12、14 三个场次」，而不是拿 11 去查一个空结果。
+     *
+     * <p><b>为什么还要认中文</b>：多轮补参数时，用户回的是「十点」这种口语。
+     * 如果只认阿拉伯数字，这句会被当成"没填"，然后无限追问。
      */
     public Integer time() {
         Integer value = intVal("time");
-        if (value == null) {
+        if (value != null) {
+            return isSession(value) ? value : null;
+        }
+        // 模型没提取出来、或者补参数时整句被塞进来 → 试着从文本里认
+        return parseChineseSession(str("time"));
+    }
+
+    private boolean isSession(int value) {
+        return value == 10 || value == 12 || value == 14;
+    }
+
+    /**
+     * 从「十点」「十二点场次」「14点」这类文本里认出场次。
+     *
+     * <p>刻意只认 10/12/14 三种，**不猜**「两点」是 2 点还是 14 点 ——
+     * 猜错了会抢错商品，让用户澄清一次代价小得多。
+     */
+    private Integer parseChineseSession(String text) {
+        if (text == null) {
             return null;
         }
-        return (value == 10 || value == 12 || value == 14) ? value : null;
+        String cleaned = text.replaceAll("[\\s:：点时场次第的]", "");
+        switch (cleaned) {
+            case "十", "10":
+                return 10;
+            case "十二", "12":
+                return 12;
+            case "十四", "14":
+                return 14;
+            default:
+                return null;
+        }
     }
 
     /**

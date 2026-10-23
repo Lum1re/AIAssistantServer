@@ -13,5 +13,11 @@ import reactor.core.publisher.Flux;
  */
 public interface FallbackChat {
 
-    Flux<String> chat(Long userId, String msg);
+    /**
+     * @param userId   手机号（服务端注入，模型接触不到）
+     * @param msg      用户原话
+     * @param readonly {@code true} 表示只给只读工具（查询类），不给下单/退款工具。
+     *                 见 {@link LegacyChatAgent} 里的说明。
+     */
+    Flux<String> chat(Long userId, String msg, boolean readonly);
 }

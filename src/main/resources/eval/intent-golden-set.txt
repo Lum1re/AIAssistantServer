@@ -1,0 +1,52 @@
+# 意图识别评测集（golden set）
+#
+# 格式：用户说法 | 期望意图
+# 用途：跑 IntentAccuracyCheck 得到真实准确率；改 description 或换模型后重跑对比。
+#
+# 注意：这份数据是"期望"，不是"答案"。如果模型判的和这里不一样，
+#      先判断是模型错了，还是这条期望本身写得不准。
+
+# ---------- 查订单 ----------
+帮我查下订单 1997233137251254272|QUERY_ORDER
+订单 1997233137251254272 到哪了|QUERY_ORDER
+我那个订单现在什么状态|QUERY_ORDER
+查一下我的订单|QUERY_ORDER
+
+# ---------- 查场次商品 ----------
+十点场次有什么|QUERY_PRODUCTS
+12 点卖什么|QUERY_PRODUCTS
+今天下午两点有什么好东西|QUERY_PRODUCTS
+14 点场次的商品列一下|QUERY_PRODUCTS
+
+# ---------- 查库存 ----------
+这个还有货吗|QUERY_STOCK
+蓝牙耳机还剩几个|QUERY_STOCK
+10 点那个商品库存还有多少|QUERY_STOCK
+
+# ---------- 查商品详情 ----------
+这个耳机什么参数|QUERY_PRODUCT_DETAIL
+商品详情给我看一下|QUERY_PRODUCT_DETAIL
+那个耳机的规格是怎样的|QUERY_PRODUCT_DETAIL
+
+# ---------- 秒杀下单 ----------
+帮我抢 10 点那个耳机|SECKILL_BUY
+我要买 12 点的商品|SECKILL_BUY
+下单 14 点场次的蓝牙耳机|SECKILL_BUY
+
+# ---------- 退款 ----------
+帮我把订单 1997233137251254272 退了|REFUND
+我要申请退款|REFUND
+这个订单我想退掉|REFUND
+
+# ---------- 常见问题 ----------
+什么时候发货|FAQ
+支持什么支付方式|FAQ
+退款多久能到账|FAQ
+能开发票吗|FAQ
+秒杀活动什么规则|FAQ
+
+# ---------- 识别不出 / 闲聊 ----------
+今天天气怎么样|UNKNOWN
+你是谁|UNKNOWN
+讲个笑话|UNKNOWN
+帮我订张机票|UNKNOWN

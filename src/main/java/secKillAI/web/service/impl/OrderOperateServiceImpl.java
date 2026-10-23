@@ -141,7 +141,29 @@ public class OrderOperateServiceImpl implements IOrderOperateService {
         if (orderNo == null) {
             return "没有待确认的退款，可能已经超时了，请重新发起。";
         }
+        return doRefund(userId, orderNo);
+    }
 
+    @Override
+    @Transactional
+    public String executeRefund(long userId, String orderNo) {
+        if (orderNo == null || orderNo.isBlank()) {
+            return "缺少订单号，无法退款。";
+        }
+        return doRefund(userId, orderNo);
+    }
+
+    /**
+     * 退款的真正执行逻辑（两条链路共用）。
+     *
+     * <p>安全检查一个都没省：
+     * <ul>
+     *   <li>二次查单：确认订单仍属于本人、状态仍是已支付（票据可能是几分钟前的）</li>
+     *   <li>{@code markRefunded} 的 SQL 带 {@code AND status = 1}：影响 0 行就拒绝，天然幂等</li>
+     *   <li>库存回补失败只记 error 日志（不影响退款成功，但需要人工对账）</li>
+     * </ul>
+     */
+    private String doRefund(long userId, String orderNo) {
         OrderInfoVo order = orderInfoMapper.queryOrder(orderNo, userId);
         if (order == null) {
             return "订单不存在或不属于当前账号。";

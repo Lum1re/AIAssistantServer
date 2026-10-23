@@ -39,20 +39,37 @@ public class LegacyChatAgent implements FallbackChat {
     private final IOrderOperateService orderOperateService;
 
     /**
-     * @param userId 手机号，作为会话记忆的 memoryId
+     * @param userId   手机号，作为会话记忆的 memoryId
+     * @param readonly {@code true} 时<b>只挂只读工具</b>（查商品/库存/详情/订单），
+     *                 不挂下单和退款。
+     *
+     *                 <p>为什么必须这么分：
+     *                 <ul>
+     *                   <li><b>编排模式的降级</b>（readonly=true）：意图识别失败才走这里。
+     *                       如果此时还挂着写工具，模型又能自己判断"用户是不是确认了"，
+     *                       票据那一整套就白做了。<b>只要有一条路能绕过票据，票据就等于不存在。</b></li>
+     *                   <li><b>人工切到 legacy 模式</b>（readonly=false）：这是出事时的保险丝，
+     *                       要保留改造前的完整能力，否则回退等于降级服务。</li>
+     *                 </ul>
      */
     @Override
-    public Flux<String> chat(Long userId, String msg) {
-        SecKillAssistant assistant = AiServices.builder(SecKillAssistant.class)
+    public Flux<String> chat(Long userId, String msg, boolean readonly) {
+        AiServices<SecKillAssistant> services = AiServices.builder(SecKillAssistant.class)
                 .chatMemoryProvider(chatMemoryProvider)
                 .streamingChatLanguageModel(streamingChatLanguageModel)
-                .maxSequentialToolsInvocations(MAX_TOOL_INVOCATIONS)
-                .tools(queryTool,
-                        new OrderTool(orderInfoMapper, userId),
-                        new SeckillOrderTool(orderOperateService, userId),
-                        new RefundTool(orderOperateService, userId))
-                .build();
+                .maxSequentialToolsInvocations(MAX_TOOL_INVOCATIONS);
 
-        return assistant.chat(userId, msg);
+        if (readonly) {
+            log.info("降级链路以只读方式运行 userId={}（不提供下单/退款工具）", userId);
+            services = services.tools(queryTool, new OrderTool(orderInfoMapper, userId));
+        } else {
+            log.debug("legacy 模式以完整工具运行 userId={}", userId);
+            services = services.tools(queryTool,
+                    new OrderTool(orderInfoMapper, userId),
+                    new SeckillOrderTool(orderOperateService, userId),
+                    new RefundTool(orderOperateService, userId));
+        }
+
+        return services.build().chat(userId, msg);
     }
 }
