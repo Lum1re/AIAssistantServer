@@ -123,15 +123,6 @@ ai.agent.lock-ttl-seconds=15
 ai.agent.confirm-ttl-minutes=5
 ```
 
-**必须配置的两个环境变量**：
-
-```powershell
-$env:DASHSCOPE_API_KEY = "sk-..."
-$env:MYSQL_PASSWORD    = "你的数据库密码"
-```
-
-> ⚠️ 密钥只放环境变量。`application.properties` 是被 git 跟踪的，写明文会公开。
-
 ### Redis Key 一览
 
 | Key | 类型 | TTL | 用途 |
@@ -207,13 +198,3 @@ redis-cli SET userToken:test-token "{\"phone\":13800000000,\"nickName\":\"test\"
 | 确认票据依赖 Redis | Redis 挂时退化成"无状态但可用" |
 
 ---
-
-## 八、踩过的坑（留给后来人）
-
-| 坑 | 现象 | 原因 |
-|---|---|---|
-| record 的 `isXxx()` 被 Jackson 当属性 | 存进去读不出来，字段丢失 | `isExpired()` 被序列化成 `"expired":true`，反序列化时无对应参数 → 必须加 `@JsonIgnore` |
-| `chat-model.log-requests` 对流式模型无效 | 日志从来不生效 | 前缀必须是 `streaming-chat-model` |
-| 只靠 TTL 释放锁 | 用户 15 秒内发不了下一条 | 正常结束要主动释放，TTL 只做兜底 |
-| `catch` 里 `return` 让事务提交 | 订单没建成、库存却少一件 | 必须 `throw` 或至少 `setRollbackOnly`（后者会抛 UnexpectedRollbackException，不如直接抛） |
-| 单字确认词用"包含"匹配 | 用户问"银行"被判定为确认 | 短词必须整句相等 |
